@@ -1,0 +1,411 @@
+---
+title: 'The Effect of Rule Changes on Concussion Rates'
+author: "Andy Walsh"
+fontsize: 11pt
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+geometry: margin=0.75in
+fig_crop: no
+bibliography: bibliography.bibtex
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(shiny)
+library(devtools)
+library(lme4)
+library(lmtest)
+library(tidyverse)
+library(rjson)
+library(reticulate)
+library(data.table)
+library(optimx)
+library(MASS)
+library(fastDummies)
+
+#devtools::install_github(repo = "maksimhorowitz/nflscrapR")
+#package for accessing nfl data
+library(nflscrapR)
+
+options(width=70, digits=4, scipen=8)
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+# Set R output size a bit smaller than default
+knitr::opts_chunk$set(size='small') 
+```
+
+# Abstract
+
+In this article, we analyze the effect of two rule changes made between the 2017-2018 and 2018-2019 NFL seasons on the number of concussions. We fit fixed effect Poisson and Negative Binomial models to aggregated week level data, and found a significant and negative effect of the rule change. We found $\beta=-0.411$ and $\beta=-0.410$, respectively. We also fit a logistic mixed effect model to player-level data to estimate the change in odds ratio that a player would receive a concussion in a given game. We found a significant and negative coefficient for this model as well, with $\beta=-0.490$. Between these models, we conclude that the NFL's rule changes were effective in reducing the amount of concussions across the league and reducing the odds that a given player would receive a concussion.
+
+# Introduction
+
+A 2017 study published in JAMA found that of the 111 brains of former NFL players that were donated, 110 had CTE [@10.1001/jama.2017.8334]. CTE is a neurogenative disorder characterized by dementia, memory loss, and other brain-related disorders. It is thought that this disease is caused by repeated head trauma, particularly concussions. Both the NFL Player's Association (the union for NFL players) and the general public have villified the NFL for not adequately responding to growing evidence of the connection between playing in the NFL and future CTE. The NFL has been making rule changes to improve player safety since the mid 1980s, but there was pressure to specifically combat concussions and provide care for players with CTE. The NFL has made changes such as expanding the definition of a defenseless player, improving helmet technology, and changing kickoff rules.
+
+The 2017 season saw a dramatic increase in the number of concussions compared to previous seasons. In order to combat this rise, the NFL implemented two rule changes to reduce concussions. First, touchbacks on kickoffs are taken to the 25 instead of the 20. A touchback is when the recieving player would have caught the kick in the end zone, but chooses to not return the kick and instead start the offensive drive at a predetermined spot. This spot used to be the 20 but now it was the 25. This was intended to reduce the amount of kickoffs, which is a disproportionately dangerous play when it comes to injuries of all types, including concussions [@burke].
+
+The second rule change was much more controversial. Players are no longer allowed to lower their helmet in order to initiate contact. Doing so would result in a 15 yard penalty and possible ejection, which is one of the harshest penalties. Other penalties that are grounds for ejection are punching an opponent and using abusive language (a racial slur for example). The harshness of the penalty was certainly a part of the controversy, but this being a penalty at all was hard to accept for NFL players, coaches, and fans. In order to gain leverage on an opponent to tackle them, a player must lower their head to a certain extent. Additionally, the defensive player doesn't always have control over how they hit the opposing player. For example, a defender could have perfect technique and be trying to not initiate contact with their helmet, but the offensive player changes path such that the defender's helmet is the first thing that hits them. This would be at the minimum a potentially game changing 15 yard penalty, through no realistic fault of the defender. 
+
+In this article we will examine the effectiveness of these combined rules. To do so, we will look at concussion count data by week for the two NFL seasons that bracket this rule change (the 2017-2018 and 2018-2019 seasons). We will also examine player-level data, and examine the odds of a concussion occuring for a given player based on the rule changes.
+
+# EDA
+
+### Data Description
+
+In order to get injury data, we built a webscraper using Python's BeautifulSoup package. We scraped the injury reports on profootballreference.com [@pro]. Here is an example report, for the Arizona Cardinals in 2018 (https://www.pro-football-reference.com/teams/crd/2018_injuries.htm). From these reports, we extracted the names of the injured players, the team they were on in that year, the date of the injury listing, the degree of the injury and the injury type. The degree of the injury is defined as 
+
+\begin{tabular}{|c|c|}
+	\hline 
+	Status & Chance to Play \\ 
+	\hline 
+	Probable  & 75\% \\ 
+	\hline 
+	Questionable  & 50\% \\ 
+	\hline
+	Doubtful & 25\% \\
+	\hline
+	Out & 0\% \\
+	\hline
+\end{tabular}
+
+There are also designations for the Physically Unable to Perform List (PUP List), and Injured Reserve (IR). The PUP list refers to football-related injuries prior to the start of the regular season, with the expectation that these players will be activated at some point during the season. Injured Reserve is for long-term serious injuries. The player is no longer on the active roster and generally cannot play for the rest of the season (two players per season can be reactivated during the season). 
+
+The injury reports also have whether or not the player played that week. However, we were also able to find snap count data [@outsiders], which is how many plays a player was on the field for in a given week. This data was also accessed by webscraping footballoutsiders.com using Python's BeautifulSoup package. This dataset will encompass players being out for injuries of all types, as well as telling us how many players played in a game. Because both rule changes only affect in-game injuries, we should only consider players that played in a game when evaluating a player's odds of getting a concussion in a given game. 
+
+However, there are a few key limitations to our data. First, not all concussions are so severe that the player would be listed as injured in the next game. This will cause an underreporting of concussions. Second, we don't have a clear way to differentiate between concussions that occured during a practice vs. concussions that occured in a game. While we can ignore concussions that happened while a player played no snaps, our dataset does not allow us to truly differentiate between the two groups. 
+
+Relevant variables from the combined dataset include the player, their position, the week of the game, the number of snaps they played during that game (with a breakdown for what side of the ball the snap occured on), the position of the player, and the injury type of the player during the week (including no injuries). Within the injury variable, there are several strings of the same value that corresponds to a player being listed for several consecutive weeks in a row. This is only due to one injury, so we code a seperate binary variable (labelled "Event") that has value 1 the week before the string of injuries begins. 
+
+```{r echo=FALSE}
+#read in snap data, get rid of row counter column
+snaps2_abb<-read.csv("Data/snap_count_V2.csv", stringsAsFactors = FALSE)
+snaps2_abb<-snaps2_abb[,!(names(snaps2_abb) %in% c("X"))]
+```
+
+```{r echo=FALSE}
+#read in team names and abbreviations, get rid of colors
+teams<-nflteams
+colors<-c("primary", "secondary", "tertiary", "quaternary")
+teams<-teams[, !(names(teams) %in% colors)]
+#teams
+```
+
+```{r echo=FALSE}
+#combine teams and snap counts, get rid of extra year column that appears
+snaps2<-merge(snaps2_abb, teams, by.x="Team", by.y="abbr")%>%
+  rename(Abbr=Team, Team=team)
+snaps2<-snaps2[, !duplicated(colnames(snaps2))]
+```
+
+```{r echo=FALSE}
+#read in injury data
+injuries_csv<-read.csv("Data/pfr_injuries.csv", header=TRUE, na.strings = c(""," ", "NA"))
+#change some column datatypes
+injuries<-injuries_csv%>%
+  transform(Player=as.character(Player),
+                          Dates=as.character(Dates),
+                          Team=as.character(Team),
+                          Injury=as.character(Injury),
+                          Concussion=as.logical(Concussion),
+                          Played=as.logical(Played),
+                         Other_Injuries=as.logical(Other_Injuries))%>%
+  #make the dates into date type
+  mutate(Full_Date=as.Date(paste(Dates, Year, sep="/"), "%m/%d/%Y"))
+#drop the weird X column
+injuries<-injuries[, !(names(injuries) %in% c("X"))]
+
+#make a column with seasons (better description than year)
+injuries$Season<-ifelse(as.numeric(substr(injuries$Dates, 1,2))>8, paste(as.character(injuries$Year), as.character(injuries$Year+1), sep="-"),paste(as.character(injuries$Year-1), as.character(injuries$Year), sep="-"))
+```
+
+```{r echo=FALSE}
+c_func<-function(x) length(rle(x)$lengths[rle(x)$values])
+
+#function that finds where changes in runs occured, use it to find event occurence
+first.changes <- function(d) {
+  p <- cumsum(rle(d)$lengths) + 1
+  p[-length(p)]
+}
+```
+
+```{r echo=FALSE}
+#only 2017-2018 and 2018-2019 (seasons around rule change)
+injuries1718<-injuries[((injuries[,"Season"]=="2017-2018")|(injuries[,"Season"]=="2018-2019"))&injuries[,"Week"]<=17,]
+#create columns for total number of weeks player was concussed
+#Find where the concussion took place (one week before first week in string of concussed weeks)
+#Turn the season into a binary variable for when the rule change was in effect
+#get number of concussions the player has had up to that point in the season
+players<-injuries1718%>%
+  mutate(concussion_weeks=ave(Concussion,Player,Season, FUN=sum),
+Event=ifelse((row_number()%in%first.changes(Concussion))&Concussion, 1, ifelse(Concussion, NA, 0)),
+Rule=ifelse(Season=="2017-2018", 0, ifelse(Season=="2018-2019", 1, NA)),
+num_concussions=rollsum(Event, k=Week, fill=0, align="right"))%>%
+  transform(Event=shift(ifelse(Event!=1&Concussion, NA, Event), fill=NA, type="lead"))
+
+#forward fill the number of concussions the player has had up to that point, resets every player and season
+players$num_concussions<-na.locf(players$num_concussions)
+
+#players$Event[!players$Event==1&players$Other_Injuries]<-NA
+players$Event[!players$Played]<-NA
+
+
+
+#table(players$num_concussions)
+#players
+```
+
+```{r echo=FALSE}
+#combine injury and snap data
+players_snap<-merge(players, snaps2[, !(names(snaps2) %in% c("Team", "Abbr"))])
+```
+
+```{r echo=FALSE}
+#turn the injury_snap data into factors/dummy vars, to use in SuperMix
+player_levels<-data.frame("Player"=unique(players_snap$Player), "ID_Player"=seq(1:length(unique(players_snap$Player))+1))
+player_factors1<-merge(players_snap, player_levels)
+player_factors<-dummy_cols(player_factors1, select_columns = "Position")
+#only numeric columns
+player_factors<-player_factors[, !(names(player_factors) %in% c("Player", "Status", "Injury", "Player_full", "Concussion", "Other_Injuries", "Played", "Dates", "Opponent", "Team", "Season", "Full_Date", "Position", "division"))]
+#get rid of rows where the player didn't play or couldn't have gotten a concussion for whatever reason
+player_factors<-player_factors[!is.na(player_factors$Event),]
+#player_factors[player_factors$Position_ST==1, ]
+write.csv(player_factors[player_factors$Snaps!=0,], "Data/player_factors.csv")
+```
+
+```{r echo=FALSE}
+#get number of concussions and number of eligible players by week
+players_snap_less<-players_snap[players_snap$Snaps!=0,]
+week_concussions<-players_snap_less%>%
+  group_by(Season, Week, Team, Position)%>%
+  summarize(out_players=sum(!Played),
+            num_players=sum(Snaps>=0, na.rm=TRUE),
+            Event=sum(Event, na.rm=TRUE))%>%
+  group_by(Season, Week)%>%
+  summarize(Event=sum(Event, na.rm=TRUE),
+            num_players=sum(num_players))%>%
+  mutate(Rule=ifelse(Season=="2017-2018", 0, ifelse(Season=="2018-2019", 1, NA)))
+#week_concussions
+```
+
+
+### Exploration
+
+First, we look at the total number of concussions in a season.
+```{r echo=FALSE}
+#number of concussions in each season
+sc<-players_snap_less%>%
+  group_by(Season)%>%
+  summarize(season_cc=sum(Event, na.rm = TRUE),
+            by_week_prop=season_cc/16)
+
+sc
+```
+There was a pretty large drop in the number, so we can expect to find that the rule change was effective. We can also stratify by position
+
+```{r echo=FALSE}
+position_count<-players_snap_less%>%
+  group_by(Season, Position)%>%
+  summarize(num_players=sum(Snaps>0),
+            season_concussions=sum(Event, na.rm=TRUE),
+            concussion_prop=season_concussions/num_players)
+
+position_count
+```
+
+We find that the proportion of concussions dropped more signfificantly for some positions than others. The proportion was calculted as the number of concussions divided by the number of eligible players. An eligible player played some snaps in the game. In particular, the proportion of concussed wide receivers dropped by an order of magnitude. This indicates effectiveness of the lowering the helmet rule, as WRs are affected by this rule more than most positions. The NFL was specifically targeting plays where the player is defenseless and the defender lowers the helmet, which often occurs on passing plays while the receiver is looking back for the ball and trying to make the catch.
+
+We look at the number of concussions by week per season:
+
+```{r echo=FALSE}
+ggplot(week_concussions, aes(x=Week, y=Event/num_players, colour=factor(Season), fill=factor(Season)))+geom_line()+geom_point()+labs(y="Proportion", color="Season", fill="Season")+ggtitle("Proportion of Concussions by Week")+theme(plot.title = element_text(hjust = 0.5))
+```
+
+For the most part, the number of concussions in each week is lower for the season that the rule is in effect.
+
+We can also look at these values as a histogram, grouped by season.
+```{r echo=FALSE}
+ggplot(week_concussions, aes(x=Event/num_players, group=Season, color=as.factor(Season), fill=as.factor(Season)))+geom_histogram(alpha=0.4)+labs(x="Proportion", color="Season", fill="Season")+ggtitle("Proportion of Active Players Concussed During Week")+theme(plot.title = element_text(hjust = 0.5))
+```
+We see that there is much overlap in the proportions between seasons, and there doesn't seem to be an underlying distribution. However, it is notable that only the 2018 season had the lowest range of proportions while the 2017 season had the highest. This suggests that the rule change was effective. 
+
+Lastly, we stratify by position. Different positions will likely have different concussion risks. This plot groups the data by position, but combines the years.
+```{r echo=FALSE}
+off_def<-players_snap%>%
+  mutate(Side=ifelse(Position %in% c("QB", "RB", "TE", "WR"), "Offense", "Defense"))
+position_week<-players_snap_less%>%
+  group_by(Week, Position)%>%
+  summarize(Event=sum(Event, na.rm=TRUE),
+            num_players=sum(Snaps>=0, na.rm=TRUE),
+            Rate=Event/num_players)
+#position_week
+ggplot(position_week, aes(x=Week, y=Rate, group=Position, color=Position))+geom_point()+geom_line()+labs(color="Position", y="Proportion")+ggtitle("Proportion of Concussions by Position")+theme(plot.title = element_text(hjust = 0.5))
+```
+The large spikes we see are from fullbacks. There are not a lot of fullbacks in the league (less than one per team), so if one concussion happens then the proportion will be large. However, the fullback's job is to run full speed into an opposing player to block, so it is plausible that this position will be high risk for a concussion. We also see high proportions of concussions for TE and QB, which is expected since there are not that many playing in a given game (for example, typically only one quarterback plays for a team throughout the game). Lastly, we group the WR position by year, as we saw a drop in the overall rate and would expect the lowering of the helmet rule to affect this position dramatically. 
+
+```{r echo=FALSE}
+WR_week<-players_snap_less[players_snap_less$Position=="WR", ]%>%
+  group_by(Season, Week)%>%
+  summarize(Event=sum(Event, na.rm=TRUE),
+            num_players=sum(Snaps>=0, na.rm=TRUE),
+            Rate=Event/num_players)
+ggplot(WR_week, aes(x=Week, y=Rate, group=Season, color=Season))+geom_point()+geom_line()+labs(color="Season", y="Proportion")+ggtitle("Proportion of Concussions by Position")+theme(plot.title = element_text(hjust = 0.5))
+```
+
+We see that for the most part, the proportion of concussions for receivers was much lower for the 2018 season than the 2017 season. All of this analysis suggests that we will find a significant and negative effect for the rule change. 
+
+It is worth noting that the kickoff rule change should affect the special teams players the most. However, there was only one concussion for a special teams player between the two combined seasons, so exploratory analysis would probably not be insightful due to how rare the event was. The only concussion did occur in the 2017 season, without the rule change, suggesting that the rule might have been effective for special teams players. However, the event was simply too rare to truly assess the effectiveness of the rule. 
+
+
+# Model Selection
+
+We attempted to fit two broad types of models to our data. The first was a count model (Poisson and Negative Binomial) with only fixed effects. This model was aggregated to only include week level of detail. We also fit a logistic random effects model on player level data to estimate the odds that any given player would get a concussion in a given week, and if those odds decreased under the rule change. 
+
+
+### Week Level
+
+We aggregated the number of concussions in each fit, and regressed the number of concussions on the week number and whether or not the rule was in effect. In both count models we include an offset term of log(number of players), where number of players corresponds to the number of players who played in the game that week. We include this term to make sure the models are accurately estimating how rare of an event a concussion is in any given NFL game. 
+
+We start with the Poisson model: 
+
+```{r echo=FALSE}
+poisson_week<-glm(Event~Week+Rule, data=week_concussions, family=poisson, offset= log(num_players))
+summary(poisson_week)
+```
+Both week and Rule are significant, as well as the intercept term. The effect of the rule is $e^{\beta_{Rule}}=$ `r exp(poisson_week$coefficients[[3]])`, which is the change in number of number of concussions for a given week due to the rule change. That is, the number of counts is multiplied by `r exp(poisson_week$coefficients[[3]])`, causing a significant decrease in number of counts. The Poisson model fits the log of the number of counts against linear effect terms, so by exponentiating the coefficients we find the effect on the number of counts.
+
+However, we do see that the mean and variance of the number of concussions by week is not the same for either season individually or the two together. 
+
+```{r echo=FALSE}
+week_concussions%>%
+  group_by(Season)%>%
+  summarize(mean=mean(Event),
+            var=var(Event))
+data.frame("Combined Mean"=mean(week_concussions$Event), "Combined Var"=
+var(week_concussions$Event))
+```
+
+With this in mind, we fit a Negative Binomial model. A Negative Binomial model is very similar to a Poisson model, except there is a dispersion term that allows the variance and mean to not be the exact same. The dispersion is estimated by our software. We saw that no weeks have 0 concussions, so we should not consider 0-inflated versions of the Poisson or Negative Binomial. To account for the discrepancy between the mean and variance, we fit a fixed effect negative binomial model: 
+
+```{r echo=FALSE}
+neg_binom<-glm.nb(Event~Week+Rule+offset(log(num_players)), data=week_concussions)
+summary(neg_binom)
+```
+Once again, the effect of the Rule is significant. We find the effect of the Rule on counts $e^{\beta_{Rule}}=$ `r exp(neg_binom$coefficients[[3]])`. This has an identical interpretation to the Rule coefficient for the Poisson model. When the rule is in effect, we multiply the number of counts by `r exp(neg_binom$coefficients[[3]])`, causing a decrease in the expected number of counts for a given week. 
+
+Both models have very similar AIC values, but the Poisson model's is slightly lower. This suggests that while the mean and variance of our concussion count is not identical, they are close enough that adding the extra dispersion term does not add enough explanatory power to warrant losing model parmisony. However, since the AIC values are so close, and the coefficients are so similar, we will consider both as evidence that the rule change led to lower concussion counts for a given week.
+
+### Player Level
+
+We now fit a logistic mixed effect model to player level data. By player level, we mean that we estimate the log odds of that player receiving a concussion by using logistic regression. Within the player level data, we also have information about the number of snaps that each player played (including on which side of the ball the snaps took place), as well as the position of the player. We expect special teams snaps to have disproportionate increase in concussion risk. We also expect different positions to have different concussion risks, so we include position as a nominal variable. 
+
+Unfortunately, R's mixed effect model capabilities are somewhat limited. We cannot do adaptive quadrature with a random intercept-random slope model (which could lead to misestimating certain coefficients, particularly the standard errors), and with the amount of data we have even a random intercept model takes far too long to run. So, we use SuperMix. 
+
+We fit five logistic mixed effects models in SuperMix, all of which were clustered by player with Event as the dependent variable. Model1 was a random intercept model and included Week, Rule, total snaps, each type of snap (offense, defense, special teams) and dummy variables for each position. Model2 was a random intercept and slope model, with random effects for the week. It included the same fixed effects as Model1. Model3 was the same as Model2, but with no position dummy variables (no positions were significant in Model2). Model4 was the same as Model3, but only included the total number of snaps, leaving out the type of snap variables. Model5 was the same as Model3 except it had the type of snap variables, and no total snaps variable. The models are not all nested, so we cannot compare all of them with likelihood ratio tests. Instead, we compare based on BIC. We report the BIC values for these models here:
+
+\begin{tabular}{|c|c|}
+	\hline 
+	Model & BIC \\ 
+	\hline 
+	1  & 2879.5 \\ 
+	\hline 
+	2  & 2879.1 \\ 
+	\hline
+	3 & 2827.9 \\
+	\hline
+	4 & 2831.4 \\
+	\hline
+	5 & 2817.7\\
+	\hline
+\end{tabular}
+
+It is worth noting that all five of these models had significant and negative effects for the rule change. As Model5 has the lowest BIC, we select it as the best fitting model. The model specification is: 
+
+Level 1: 
+
+$E_{ij}=b_{0i}+b_{1i}W_{ij}+b_{2i}R_{ij}+b_{3i}O_{ij}+b_{4i}D_{ij}+b_{5i}S_{ij}+e_{ij}$ with 
+
+Level 2: 
+
+$b_{0i}=\beta_0+\nu_{0i}$
+
+$b_{1i}=\beta_1+\nu_{1i}$
+
+$b_{2i}=\beta_2$
+
+$b_{3i}=\beta_3$
+
+$b_{4i}=\beta_4$
+
+$b_{5i}=\beta_5$
+
+Here $i$ refers to each individual player, $j$ refers to each time point, $W$ refers to the week number, $R$ is the rule change, $O$ is the number of offensive snaps, $D$ is the number of defensive snaps, $S$ is the number of special teams snaps, and $e$ is the error term. 
+SuperMix estimated the coefficients as: 
+
+\begin{tabular}{|c|c|c|c|}
+	\hline 
+	Parameter & Estimate & Standard Error & P Value \\ 
+	\hline 
+	Intercept ($\beta_0$) & -4.41 & 0.355 & 0.000 \\ 
+	\hline 
+	Week ($\beta_1$) & 0.0616 & 0.0301 & 0.0409 \\ 
+	\hline 
+	Rule ($\beta_2$) & -0.490 & 0.145 & 0.0007 \\
+	\hline 
+	O Snaps ($\beta_3$) & -0.0284 & 0.0039 & 0.000\\
+	\hline
+	D Snaps ($\beta_4$) & -0.0284 & 0.0039 & 0.000\\
+	\hline
+	ST Snaps ($\beta_5$) & -0.0960 & 0.0135 & 0.000\\
+	\hline
+	$\sigma^2_{\nu_0}$ & 3.912 & 1.05 & 0.0002\\
+	\hline
+	$\sigma^2_{\nu_1}$ & 0.0199 & 0.0060 & 0.001\\
+	\hline
+	$\sigma^2_{\nu_0\nu_1}$ & -0.228 & 0.0711 & 0.0013 \\
+	\hline 
+\end{tabular}
+
+Note that all of the random effect variances are significant, meaning we are justified in including the random effects in the models. We found in all 5 models that the random effects were significant, both in the random intercept and random intercept-random slope models. 
+
+By exponentiating the regression coefficients, we can find the change in odds ratio due to a unit increase in that variable. Or, in the case of the rule, we find the change in odds ratio due to the rule change being in effect compared to it not being in effect. We find:
+
+\begin{tabular}{|c|c|c|}
+	\hline 
+	Parameter & Estimate & OR (exp(Estimate))  \\ 
+	\hline 
+	Intercept ($\beta_0$) & -4.41 & 0.0122  \\ 
+	\hline 
+	Week ($\beta_1$) & 0.0616 & 1.064 \\ 
+	\hline 
+	Rule ($\beta_2$) & -0.490 & 0.613 \\
+	\hline 
+	O Snaps ($\beta_3$) & -0.0284 & 0.972 \\
+	\hline
+	D Snaps ($\beta_4$) & -0.0284 & 0.982 \\
+	\hline
+	ST Snaps ($\beta_5$) & -0.0960 & 0.901 \\
+	\hline
+\end{tabular}
+
+An odds ratio in this context is the odds that a player will get a concussion in a given week given a change in the variable compared to the odds that they won't given the same change in the variable. That is, an odds ratio of less than one indicates that a player has a less chance of recieving a concussion with increases in the variable (or less chance of receiving a concussion with the rule change than without the rule change). A significant p value for the regression coefficient means that the odds ratio is different than 1, though it could be both greater than or less than one. We find that the Week number increases the odds ratio of a concussion, while Rule and all three types of snaps decrease the odds ratio of concussion. 
+
+# Discussion
+
+In this analysis, we examined the effect of two rule changes the NFL made between the 2017-2018 and 2018-2019 seasons on the number of concussions. We used Poisson and Negative Binomial fixed effect models on the counts of concussions by week, and found a significant and negative effect of the rule change for both. That is, both count models found that the rule change decreased the concussion rate. We also fit a logistic mixed effect model to player-level data. We clustered the data by player, and found significant effects for the Week number, the rule change, and the three types of snaps. The rule change effect was negative, meaning that the rule caused a decrease in the odds ratio of getting a concussion. That is, the probability that a player would get a concussion vs not getting a concussion in a given game went down due to the rule change. Between all the models we considered, all had significant and negative effects for the rule changes, so we conclude that the rule changes were effective in limiting concussions.
+
+It is interesting to note that the snap count variables all had significant effects as well, but the effects were negative. Intuitively, the more snaps a player plays the more likely they are to sustain a concussion, or an injury of any type. Each play carries a certain risk of injury, so more plays should correlate with more injuries. However, we found that more plays correlates with less concussions. This is likely due to in-game concussions. When a player sustains a concussion in a game, they leave the game for at least a certain amount of time, and likely are out for the rest of the game. This means that they will have fewer plays than they normally would if they had not received the concussion. It would be interesting to see if different ways of counting the snaps would lead to a different result. For example, a future analysis including how many snaps the player had played up to that point in the season or in their career might lead to a positive coefficient.
+
+We found that the effects of position on the number of concussions was not significant. However, as we saw in the case of receivers, there is possibly an interaction effect between position and the rule change, or possibly an interaction between the position and number of snaps. The effects of position on concussion rates should be the subject of additional study. 
+
+Lastly, we underreported concussions. The NFL reported 178 in game concussions in 2017 and 127 in game concussions in 2018 [@nfl], while we counted 162 and 93, respectively. This is likely due to our data collection. Our injury data source only counted a concussion if the player was listed for the concussion in the following week. Not all concussed players are listed in the next week, so we will be underreporting concussions. However, our analysis is valid for more severe concussions, where the player is listed for at least a week. The NFL has an "Injury Surveillence System" (ISS), where it monitors injuries as they occur. It reports injury summary statistics based off this, but the data is not publically available. A future analysis using similar methods, but with the full ISS data, would be able to better analyze the effect of the rule changes on concussion counts and rates.
+
+# References
+
+
+
